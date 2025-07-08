@@ -150,6 +150,148 @@ void freeScreenshot(ScreenshotData* screenshot) {
         free(screenshot);
     }
 }
+
+// Set text to clipboard
+int setClipboardText(const char* text) {
+    if (!OpenClipboard(NULL)) {
+        return 0;
+    }
+    
+    EmptyClipboard();
+    
+    int len = strlen(text);
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, len + 1);
+    if (!hMem) {
+        CloseClipboard();
+        return 0;
+    }
+    
+    char* pMem = (char*)GlobalLock(hMem);
+    strcpy(pMem, text);
+    GlobalUnlock(hMem);
+    
+    SetClipboardData(CF_TEXT, hMem);
+    CloseClipboard();
+    
+    return 1;
+}
+
+// Simulate keyboard input
+void simulateKeyPress(WORD vkCode) {
+    INPUT input;
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vkCode;
+    input.ki.wScan = 0;
+    input.ki.dwFlags = 0;
+    input.ki.time = 0;
+    input.ki.dwExtraInfo = 0;
+    
+    // Key down
+    SendInput(1, &input, sizeof(INPUT));
+    
+    // Key up
+    input.ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(1, &input, sizeof(INPUT));
+}
+
+// Simulate Ctrl+V followed by Enter
+void simulatePasteAndEnter() {
+    INPUT inputs[4];
+    
+    // Ctrl down
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = VK_CONTROL;
+    inputs[0].ki.wScan = 0;
+    inputs[0].ki.dwFlags = 0;
+    inputs[0].ki.time = 0;
+    inputs[0].ki.dwExtraInfo = 0;
+    
+    // V down
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = 'V';
+    inputs[1].ki.wScan = 0;
+    inputs[1].ki.dwFlags = 0;
+    inputs[1].ki.time = 0;
+    inputs[1].ki.dwExtraInfo = 0;
+    
+    // V up
+    inputs[2].type = INPUT_KEYBOARD;
+    inputs[2].ki.wVk = 'V';
+    inputs[2].ki.wScan = 0;
+    inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
+    inputs[2].ki.time = 0;
+    inputs[2].ki.dwExtraInfo = 0;
+    
+    // Ctrl up
+    inputs[3].type = INPUT_KEYBOARD;
+    inputs[3].ki.wVk = VK_CONTROL;
+    inputs[3].ki.wScan = 0;
+    inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
+    inputs[3].ki.time = 0;
+    inputs[3].ki.dwExtraInfo = 0;
+    
+    // Send Ctrl+V
+    SendInput(4, inputs, sizeof(INPUT));
+    
+    // Small delay
+    Sleep(50);
+    
+    // Send Enter
+    simulateKeyPress(VK_RETURN);
+}
+
+// Simulate mouse click at specified coordinates
+void simulateMouseClick(int x, int y) {
+    // Get screen dimensions for coordinate validation
+    int screenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    
+    if (screenWidth == 0 || screenHeight == 0) {
+        screenWidth = GetSystemMetrics(SM_CXSCREEN);
+        screenHeight = GetSystemMetrics(SM_CYSCREEN);
+        screenX = 0;
+        screenY = 0;
+    }
+    
+    // Adjust coordinates for virtual screen
+    x += screenX;
+    y += screenY;
+    
+    // Validate coordinates
+    if (x < screenX || x >= screenX + screenWidth || y < screenY || y >= screenY + screenHeight) {
+        return; // Invalid coordinates
+    }
+    
+    // Set cursor position
+    SetCursorPos(x, y);
+    
+    // Small delay to ensure cursor position is set
+    Sleep(10);
+    
+    INPUT inputs[2];
+    
+    // Mouse down
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dx = 0;
+    inputs[0].mi.dy = 0;
+    inputs[0].mi.mouseData = 0;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    inputs[0].mi.time = 0;
+    inputs[0].mi.dwExtraInfo = 0;
+    
+    // Mouse up
+    inputs[1].type = INPUT_MOUSE;
+    inputs[1].mi.dx = 0;
+    inputs[1].mi.dy = 0;
+    inputs[1].mi.mouseData = 0;
+    inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    inputs[1].mi.time = 0;
+    inputs[1].mi.dwExtraInfo = 0;
+    
+    SendInput(2, inputs, sizeof(INPUT));
+}
 */
 import "C"
 import (
@@ -410,4 +552,41 @@ func SaveScreenshotToFile() (string, error) {
     }
     
     return absPath, nil
+}
+
+// SetClipboardText sets text to Windows clipboard
+func SetClipboardText(text string) error {
+    cText := C.CString(text)
+    defer C.free(unsafe.Pointer(cText))
+    
+    result := C.setClipboardText(cText)
+    if result == 0 {
+        return fmt.Errorf("failed to set clipboard text")
+    }
+    
+    return nil
+}
+
+// SimulatePasteAndEnter simulates Ctrl+V followed by Enter key press
+func SimulatePasteAndEnter() {
+    C.simulatePasteAndEnter()
+}
+
+// SimulateMouseClick simulates a mouse click at the specified screen coordinates
+func SimulateMouseClick(x, y int) {
+    C.simulateMouseClick(C.int(x), C.int(y))
+}
+
+// SendTextToClipboardAndPaste sends text to clipboard and simulates paste+enter
+func SendTextToClipboardAndPaste(text string) error {
+    err := SetClipboardText(text)
+    if err != nil {
+        return err
+    }
+    
+    // Small delay to ensure clipboard is set
+    time.Sleep(10 * time.Millisecond)
+    
+    SimulatePasteAndEnter()
+    return nil
 }

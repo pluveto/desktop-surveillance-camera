@@ -45,6 +45,21 @@
             text-align: center;
             margin-top: 20px;
         }
+        .control-row {
+            margin: 10px 0;
+        }
+        .text-input-container {
+            margin: 20px 0;
+            text-align: center;
+        }
+        .text-input {
+            width: 300px;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            margin-right: 10px;
+        }
         .btn {
             background-color: #007cba;
             color: white;
@@ -146,16 +161,26 @@
         </div>
         
         <div class="screenshot-container">
-            <img id="screenshot" class="screenshot" src="/last" alt="Screenshot" onload="updateLastUpdate()" onerror="handleImageError()">
+            <img id="screenshot" class="screenshot" src="/last" alt="Screenshot" onload="updateLastUpdate()" onerror="handleImageError()" onclick="handleScreenshotClick(event)">
+        </div>
+        
+        <div class="text-input-container">
+            <input type="text" id="textInput" class="text-input" placeholder="输入要发送的文本..." maxlength="500">
+            <button class="btn" onclick="sendText()">发送文本</button>
+            <button class="btn" onclick="clearTextInput()">清空</button>
         </div>
         
         <div class="controls">
-            <button class="btn" onclick="refreshScreenshot()">Refresh Screenshot</button>
-            <button id="regionBtn" class="btn" onclick="toggleRegionMode()">Enable Region Mode</button>
-            <button id="autoRefreshBtn" class="btn" onclick="toggleAutoRefresh()">
-                {{if eq .Config.Capture.Mode "realtime"}}Disable Auto Refresh{{else}}Enable Auto Refresh{{end}}
-            </button>
-            <button class="btn success" onclick="saveConfig()">Save Config</button>
+            <div class="control-row">
+                <button class="btn" onclick="refreshScreenshot()">Refresh Screenshot</button>
+                <button id="regionBtn" class="btn" onclick="toggleRegionMode()">Enable Region Mode</button>
+                <button id="autoRefreshBtn" class="btn" onclick="toggleAutoRefresh()">
+                    {{if eq .Config.Capture.Mode "realtime"}}Disable Auto Refresh{{else}}Enable Auto Refresh{{end}}
+                </button>
+            </div>
+            <div class="control-row">
+                <button class="btn success" onclick="saveConfig()">Save Config</button>
+            </div>
         </div>
         
         <div class="preview-container" id="previewContainer">
@@ -182,6 +207,9 @@
             <div><strong>Region screenshot:</strong> /last?x=100&y=100&width=800&height=600</div>
             <div><strong>Compressed screenshot:</strong> /last?compress=true&max_width=800&max_height=600</div>
             <div><strong>Combined:</strong> /last?x=0&y=0&width=1920&height=1080&compress=true&max_width=640&max_height=480</div>
+            <div><strong>Send text:</strong> POST /send-text {"text": "Hello World"}</div>
+            <div><strong>Mouse click:</strong> POST /click {"x": 100, "y": 200}</div>
+            <div><strong>Screen info:</strong> GET /screen-info</div>
         </div>
     </div>
 
@@ -505,6 +533,111 @@
                 alert('Failed to save configuration');
             });
         }
+        
+        // New functions for text sending and mouse clicking
+        function sendText() {
+            const textInput = document.getElementById('textInput');
+            const text = textInput.value.trim();
+            
+            if (!text) {
+                alert('请输入要发送的文本');
+                return;
+            }
+            
+            fetch('/send-text', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ text: text })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert('文本发送成功！');
+                    textInput.value = ''; // Clear input after successful send
+                } else {
+                    alert('文本发送失败');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('文本发送失败: ' + error.message);
+            });
+        }
+        
+        function clearTextInput() {
+            document.getElementById('textInput').value = '';
+        }
+        
+        function handleScreenshotClick(event) {
+            if (regionMode) {
+                return; // Don't handle clicks during region selection mode
+            }
+            
+            const img = event.target;
+            const rect = img.getBoundingClientRect();
+            
+            // Get click coordinates relative to the image
+            const clickX = event.clientX - rect.left;
+            const clickY = event.clientY - rect.top;
+            
+            // Get actual screen resolution and convert coordinates
+            fetch('/screen-info')
+                .then(response => response.json())
+                .then(screenInfo => {
+                    // Convert from display coordinates to screen coordinates
+                    const scaleX = screenInfo.width / img.clientWidth;
+                    const scaleY = screenInfo.height / img.clientHeight;
+                    
+                    const screenX = Math.round(clickX * scaleX);
+                    const screenY = Math.round(clickY * scaleY);
+                    
+                    // Send click to server
+                    fetch('/click', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ x: screenX, y: screenY })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            console.log(`Mouse click sent: (${screenX}, ${screenY})`);
+                        } else {
+                            console.error('Failed to send mouse click');
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error sending click:', error);
+                    });
+                })
+                .catch(error => {
+                    console.error('Failed to get screen info:', error);
+                    // Fallback: assume screenshot is actual size
+                    fetch('/click', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ x: Math.round(clickX), y: Math.round(clickY) })
+                    })
+                    .catch(err => console.error('Fallback click failed:', err));
+                });
+        }
+        
+        // Add Enter key support for text input
+        document.addEventListener('DOMContentLoaded', function() {
+            const textInput = document.getElementById('textInput');
+            if (textInput) {
+                textInput.addEventListener('keypress', function(event) {
+                    if (event.key === 'Enter') {
+                        sendText();
+                    }
+                });
+            }
+        });
         
         if (isRealtime) {
             autoRefreshInterval = setInterval(refreshScreenshot, refreshIntervalSeconds * 1000);

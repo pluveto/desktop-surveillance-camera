@@ -262,6 +262,8 @@ func (s *Server) Start() error {
 	http.HandleFunc("/config", s.handleConfig)
 	http.HandleFunc("/preview", s.handlePreview)
 	http.HandleFunc("/screen-info", s.handleScreenInfo)
+	http.HandleFunc("/send-text", s.handleSendText)
+	http.HandleFunc("/click", s.handleClick)
 
 	s.startRealtimeCapture()
 
@@ -377,4 +379,62 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Write(pngData)
+}
+
+// handleSendText handles text sending to clipboard and simulates paste+enter
+func (s *Server) handleSendText(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	type TextRequest struct {
+		Text string `json:"text"`
+	}
+
+	var req TextRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if req.Text == "" {
+		http.Error(w, "Text cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	err = SendTextToClipboardAndPaste(req.Text)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to send text: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+}
+
+// handleClick handles mouse click simulation
+func (s *Server) handleClick(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	type ClickRequest struct {
+		X int `json:"x"`
+		Y int `json:"y"`
+	}
+
+	var req ClickRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	SimulateMouseClick(req.X, req.Y)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }

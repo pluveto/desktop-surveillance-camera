@@ -56,3 +56,23 @@ func (s *Screenshot) ToPNGBytesWithOptions(opts *ScreenshotOptions) ([]byte, err
 func SaveScreenshotToFile() (string, error) {
     return "", fmt.Errorf("screenshot functionality is only supported on Windows, current OS: %s", runtime.GOOS)
 }
+
+// SetClipboardText sets text to clipboard (not supported on non-Windows)
+func SetClipboardText(text string) error {
+    return fmt.Errorf("clipboard functionality is only supported on Windows, current OS: %s", runtime.GOOS)
+}
+
+// SimulatePasteAndEnter simulates paste and enter (not supported on non-Windows)
+func SimulatePasteAndEnter() {
+    // Do nothing on non-Windows platforms
+}
+
+// SimulateMouseClick simulates mouse click (not supported on non-Windows)
+func SimulateMouseClick(x, y int) {
+    // Do nothing on non-Windows platforms
+}
+
+// SendTextToClipboardAndPaste sends text and simulates paste (not supported on non-Windows)
+func SendTextToClipboardAndPaste(text string) error {
+    return fmt.Errorf("text input functionality is only supported on Windows, current OS: %s", runtime.GOOS)
+}
