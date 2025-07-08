@@ -189,12 +189,12 @@
         // Configuration from server
         const CONFIG = {
             server: {
-                host: {{.Config.Server.Host | printf "%q"}},
+                host: "{{.Config.Server.Host}}",
                 port: {{.Config.Server.Port}}
             },
             capture: {
-                mode: {{.Config.Capture.Mode | printf "%q"}},
-                interval: {{(.Config.Capture.Interval.String) | printf "%q"}},
+                mode: "{{.Config.Capture.Mode}}",
+                interval: "{{.Config.Capture.Interval.String}}",
                 region: {{if .Config.Capture.Region}}{
                     x: {{.Config.Capture.Region.X}},
                     y: {{.Config.Capture.Region.Y}},
