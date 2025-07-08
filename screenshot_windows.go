@@ -3,7 +3,7 @@
 package main
 
 /*
-#cgo LDFLAGS: -lgdi32 -luser32
+#cgo LDFLAGS: -lgdi32 -luser32 -lshcore
 #include <windows.h>
 #include <wingdi.h>
 
@@ -15,16 +15,30 @@ typedef struct {
 } ScreenshotData;
 
 ScreenshotData* takeScreenshot() {
+    // Set DPI awareness to get actual screen resolution
+    SetProcessDPIAware();
+    
     HDC hdcScreen = GetDC(NULL);
     HDC hdcMemDC = CreateCompatibleDC(hdcScreen);
     
-    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    // Get actual screen dimensions (not DPI scaled)
+    int screenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    
+    // If virtual screen metrics return 0, fall back to primary screen
+    if (screenWidth == 0 || screenHeight == 0) {
+        screenWidth = GetSystemMetrics(SM_CXSCREEN);
+        screenHeight = GetSystemMetrics(SM_CYSCREEN);
+        screenX = 0;
+        screenY = 0;
+    }
     
     HBITMAP hbmScreen = CreateCompatibleBitmap(hdcScreen, screenWidth, screenHeight);
     SelectObject(hdcMemDC, hbmScreen);
     
-    BitBlt(hdcMemDC, 0, 0, screenWidth, screenHeight, hdcScreen, 0, 0, SRCCOPY);
+    BitBlt(hdcMemDC, 0, 0, screenWidth, screenHeight, hdcScreen, screenX, screenY, SRCCOPY);
     
     BITMAPINFOHEADER bi;
     bi.biSize = sizeof(BITMAPINFOHEADER);
@@ -58,17 +72,34 @@ ScreenshotData* takeScreenshot() {
 }
 
 ScreenshotData* takeRegionScreenshot(int x, int y, int width, int height) {
+    // Set DPI awareness to get actual screen resolution
+    SetProcessDPIAware();
+    
     HDC hdcScreen = GetDC(NULL);
     HDC hdcMemDC = CreateCompatibleDC(hdcScreen);
     
-    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    int screenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    
+    // If virtual screen metrics return 0, fall back to primary screen
+    if (screenWidth == 0 || screenHeight == 0) {
+        screenWidth = GetSystemMetrics(SM_CXSCREEN);
+        screenHeight = GetSystemMetrics(SM_CYSCREEN);
+        screenX = 0;
+        screenY = 0;
+    }
+    
+    // Adjust coordinates for virtual screen offset
+    x += screenX;
+    y += screenY;
     
     // Validate and clamp coordinates
-    if (x < 0) x = 0;
-    if (y < 0) y = 0;
-    if (x + width > screenWidth) width = screenWidth - x;
-    if (y + height > screenHeight) height = screenHeight - y;
+    if (x < screenX) x = screenX;
+    if (y < screenY) y = screenY;
+    if (x + width > screenX + screenWidth) width = screenX + screenWidth - x;
+    if (y + height > screenY + screenHeight) height = screenY + screenHeight - y;
     if (width <= 0 || height <= 0) {
         ReleaseDC(NULL, hdcScreen);
         DeleteDC(hdcMemDC);
@@ -264,14 +295,53 @@ func (s *Screenshot) ToCompressedImage(maxWidth, maxHeight int) image.Image {
     // Create new image with calculated dimensions
     resized := image.NewRGBA(image.Rect(0, 0, newWidth, newHeight))
     
-    // Simple nearest neighbor scaling
+    // Bilinear interpolation for better quality
     for y := 0; y < newHeight; y++ {
         for x := 0; x < newWidth; x++ {
-            srcX := int(float64(x) / scale)
-            srcY := int(float64(y) / scale)
-            if srcX < originalWidth && srcY < originalHeight {
-                resized.Set(x, y, img.At(srcX, srcY))
-            }
+            srcX := float64(x) / scale
+            srcY := float64(y) / scale
+            
+            // Get the four surrounding pixels
+            x1 := int(srcX)
+            y1 := int(srcY)
+            x2 := x1 + 1
+            y2 := y1 + 1
+            
+            // Clamp coordinates
+            if x1 < 0 { x1 = 0 }
+            if y1 < 0 { y1 = 0 }
+            if x2 >= originalWidth { x2 = originalWidth - 1 }
+            if y2 >= originalHeight { y2 = originalHeight - 1 }
+            
+            // Calculate interpolation weights
+            dx := srcX - float64(x1)
+            dy := srcY - float64(y1)
+            
+            // Get the four pixels
+            p11 := img.At(x1, y1)
+            p12 := img.At(x1, y2)
+            p21 := img.At(x2, y1)
+            p22 := img.At(x2, y2)
+            
+            // Convert to RGBA
+            r11, g11, b11, a11 := p11.RGBA()
+            r12, g12, b12, a12 := p12.RGBA()
+            r21, g21, b21, a21 := p21.RGBA()
+            r22, g22, b22, a22 := p22.RGBA()
+            
+            // Perform bilinear interpolation
+            r := (1-dx)*(1-dy)*float64(r11) + dx*(1-dy)*float64(r21) + (1-dx)*dy*float64(r12) + dx*dy*float64(r22)
+            g := (1-dx)*(1-dy)*float64(g11) + dx*(1-dy)*float64(g21) + (1-dx)*dy*float64(g12) + dx*dy*float64(g22)
+            b := (1-dx)*(1-dy)*float64(b11) + dx*(1-dy)*float64(b21) + (1-dx)*dy*float64(b12) + dx*dy*float64(b22)
+            a := (1-dx)*(1-dy)*float64(a11) + dx*(1-dy)*float64(a21) + (1-dx)*dy*float64(a12) + dx*dy*float64(a22)
+            
+            // Convert back to 8-bit and set pixel
+            resized.Set(x, y, color.RGBA{
+                uint8(r / 257), // Convert from 16-bit to 8-bit
+                uint8(g / 257),
+                uint8(b / 257),
+                uint8(a / 257),
+            })
         }
     }
     
