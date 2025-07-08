@@ -1,1 +1,41 @@
+# Binaries
 *.exe
+surveillance-camera
+build/
+dist/
+
+# Logs
+*.log
+logs/
+
+# Screenshots
+screenshot_*.png
+
+# Config files
+config.json
+
+# Dependencies
+go.sum
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+
+# Test files
+test_*
+
+# Coverage files
+*.out
+coverage.html
