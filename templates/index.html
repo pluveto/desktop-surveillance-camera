@@ -194,7 +194,7 @@
             },
             capture: {
                 mode: {{.Config.Capture.Mode | printf "%q"}},
-                interval: {{.Config.Capture.Interval | printf "%q"}},
+                interval: {{(.Config.Capture.Interval.String) | printf "%q"}},
                 region: {{if .Config.Capture.Region}}{
                     x: {{.Config.Capture.Region.X}},
                     y: {{.Config.Capture.Region.Y}},
@@ -342,23 +342,75 @@
             const currentY = e.clientY - rect.top;
             
             const width = Math.abs(currentX - startX);
-            const height = Math.abs(startY - currentY);
+            const height = Math.abs(currentY - startY);
             
             if (width > 10 && height > 10) { // Minimum selection size
                 const previewImg = document.getElementById('previewImage');
-                const scaleX = previewImg.naturalWidth / previewImg.clientWidth;
-                const scaleY = previewImg.naturalHeight / previewImg.clientHeight;
                 
-                currentRegion = {
-                    x: Math.round(Math.min(startX, currentX) * scaleX),
-                    y: Math.round(Math.min(startY, currentY) * scaleY),
-                    width: Math.round(width * scaleX),
-                    height: Math.round(Math.abs(currentY - startY) * scaleY)
-                };
-                
-                document.getElementById('regionText').textContent = 
-                    currentRegion.width + 'x' + currentRegion.height + ' at (' + currentRegion.x + ', ' + currentRegion.y + ')';
-                document.getElementById('regionInfo').style.display = 'block';
+                // Get actual screen resolution
+                fetch('/screen-info')
+                    .then(response => response.json())
+                    .then(screenInfo => {
+                        // Preview image dimensions (displayed size)
+                        const previewWidth = previewImg.clientWidth;
+                        const previewHeight = previewImg.clientHeight;
+                        
+                        // Preview image natural dimensions (compressed screenshot size, max 800x600)
+                        const previewNaturalWidth = previewImg.naturalWidth;
+                        const previewNaturalHeight = previewImg.naturalHeight;
+                        
+                        // Actual screen resolution
+                        const screenWidth = screenInfo.width;
+                        const screenHeight = screenInfo.height;
+                        
+                        // Calculate region in preview display coordinates
+                        const previewRegionX = Math.min(startX, currentX);
+                        const previewRegionY = Math.min(startY, currentY);
+                        const previewRegionWidth = width;
+                        const previewRegionHeight = height;
+                        
+                        // Convert from preview display size to preview natural size
+                        const scaleToNatural = Math.min(previewNaturalWidth / previewWidth, previewNaturalHeight / previewHeight);
+                        const naturalRegionX = Math.round(previewRegionX * scaleToNatural);
+                        const naturalRegionY = Math.round(previewRegionY * scaleToNatural);
+                        const naturalRegionWidth = Math.round(previewRegionWidth * scaleToNatural);
+                        const naturalRegionHeight = Math.round(previewRegionHeight * scaleToNatural);
+                        
+                        // Convert from preview natural size to actual screen coordinates
+                        const scaleToScreen = Math.max(screenWidth / previewNaturalWidth, screenHeight / previewNaturalHeight);
+                        const screenRegionX = Math.round(naturalRegionX * scaleToScreen);
+                        const screenRegionY = Math.round(naturalRegionY * scaleToScreen);
+                        const screenRegionWidth = Math.round(naturalRegionWidth * scaleToScreen);
+                        const screenRegionHeight = Math.round(naturalRegionHeight * scaleToScreen);
+                        
+                        currentRegion = {
+                            x: screenRegionX,
+                            y: screenRegionY,
+                            width: screenRegionWidth,
+                            height: screenRegionHeight
+                        };
+                        
+                        document.getElementById('regionText').textContent = 
+                            currentRegion.width + 'x' + currentRegion.height + ' at (' + currentRegion.x + ', ' + currentRegion.y + ') [screen coords]';
+                        document.getElementById('regionInfo').style.display = 'block';
+                    })
+                    .catch(error => {
+                        console.error('Failed to get screen info:', error);
+                        // Fallback to simple scaling
+                        const scaleX = previewImg.naturalWidth / previewImg.clientWidth;
+                        const scaleY = previewImg.naturalHeight / previewImg.clientHeight;
+                        
+                        currentRegion = {
+                            x: Math.round(Math.min(startX, currentX) * scaleX),
+                            y: Math.round(Math.min(startY, currentY) * scaleY),
+                            width: Math.round(width * scaleX),
+                            height: Math.round(height * scaleY)
+                        };
+                        
+                        document.getElementById('regionText').textContent = 
+                            currentRegion.width + 'x' + currentRegion.height + ' at (' + currentRegion.x + ', ' + currentRegion.y + ') [fallback]';
+                        document.getElementById('regionInfo').style.display = 'block';
+                    });
             }
         }
         

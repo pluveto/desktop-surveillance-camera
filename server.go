@@ -261,6 +261,7 @@ func (s *Server) Start() error {
 	http.HandleFunc("/last", s.handleLast)
 	http.HandleFunc("/config", s.handleConfig)
 	http.HandleFunc("/preview", s.handlePreview)
+	http.HandleFunc("/screen-info", s.handleScreenInfo)
 
 	s.startRealtimeCapture()
 
@@ -272,6 +273,23 @@ func (s *Server) Start() error {
 	}
 
 	return http.ListenAndServe(addr, nil)
+}
+
+func (s *Server) handleScreenInfo(w http.ResponseWriter, r *http.Request) {
+	// Take a minimal screenshot to get actual screen dimensions
+	screenshot, err := TakeScreenshot()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get screen info: %v", err), http.StatusInternalServerError)
+		return
+	}
+	
+	screenInfo := map[string]int{
+		"width":  screenshot.Width,
+		"height": screenshot.Height,
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(screenInfo)
 }
 
 func (s *Server) Stop() {
