@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -17,13 +18,30 @@ type Server struct {
 	lastUpdate     time.Time
 	mu             sync.RWMutex
 	stopChan       chan struct{}
+	template       *template.Template
 }
 
 func NewServer(config *Config, configFile string) *Server {
+	tmpl, err := template.ParseFiles("templates/index.html")
+	if err != nil {
+		// If template file doesn't exist, create a basic embedded template
+		tmpl = template.Must(template.New("index").Parse(`
+<!DOCTYPE html>
+<html>
+<head><title>Desktop Surveillance Camera</title></head>
+<body>
+	<h1>Desktop Surveillance Camera</h1>
+	<p>Template file not found. Please create templates/index.html</p>
+	<img src="/last" alt="Screenshot">
+</body>
+</html>`))
+	}
+
 	return &Server{
 		config:     config,
 		configFile: configFile,
 		stopChan:   make(chan struct{}),
+		template:   tmpl,
 	}
 }
 
@@ -82,8 +100,20 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Prepare template data
+	data := struct {
+		Config          *Config
+		IntervalSeconds int
+	}{
+		Config:          s.config,
+		IntervalSeconds: int(s.config.Capture.Interval.Seconds()),
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(s.getIndexHTML()))
+	err := s.template.Execute(w, data)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Template error: %v", err), http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) handleLast(w http.ResponseWriter, r *http.Request) {
@@ -255,7 +285,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(s.config)
 		return
 	}
-	
+
 	if r.Method == "POST" {
 		// Update configuration
 		var newConfig Config
@@ -264,24 +294,24 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 			return
 		}
-		
+
 		// Validate the new configuration
 		if newConfig.Server.Port < 1 || newConfig.Server.Port > 65535 {
 			http.Error(w, "Invalid port number", http.StatusBadRequest)
 			return
 		}
-		
+
 		if newConfig.Capture.Mode != "ondemand" && newConfig.Capture.Mode != "realtime" {
 			http.Error(w, "Invalid capture mode", http.StatusBadRequest)
 			return
 		}
-		
+
 		// Update in-memory configuration
 		s.mu.Lock()
 		oldMode := s.config.Capture.Mode
 		s.config = &newConfig
 		s.mu.Unlock()
-		
+
 		// Save to file if requested
 		if r.URL.Query().Get("save") == "true" {
 			err = SaveConfig(&newConfig, s.configFile)
@@ -290,18 +320,18 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		
+
 		// Restart realtime capture if mode changed
 		if oldMode != newConfig.Capture.Mode {
 			// Note: In a more sophisticated implementation, we might restart the capture goroutine
 			// For now, we'll just update the config and let the user restart if needed
 		}
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 		return
 	}
-	
+
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
@@ -310,539 +340,23 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	opts := &ScreenshotOptions{
 		Region:    nil, // Always full screen for preview
 		Compress:  true,
-		MaxWidth:  800,  // Small preview size
+		MaxWidth:  800, // Small preview size
 		MaxHeight: 600,
 	}
-	
+
 	screenshot, err := TakeScreenshotWithOptions(opts)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to capture preview: %v", err), http.StatusInternalServerError)
 		return
 	}
-	
+
 	pngData, err := screenshot.ToPNGBytesWithOptions(opts)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to encode preview: %v", err), http.StatusInternalServerError)
 		return
 	}
-	
+
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Write(pngData)
-}
-
-func (s *Server) getIndexHTML() string {
-	mode := s.config.Capture.Mode
-	interval := int(s.config.Capture.Interval.Seconds())
-
-	// Get region info
-	regionInfo := ""
-	if s.config.Capture.Region != nil {
-		regionInfo = fmt.Sprintf("<br><strong>Region:</strong> %dx%d at (%d,%d)",
-			s.config.Capture.Region.Width, s.config.Capture.Region.Height,
-			s.config.Capture.Region.X, s.config.Capture.Region.Y)
-	}
-
-	// Get compression info
-	compressionInfo := ""
-	if s.config.Capture.Compression.Enabled {
-		compressionInfo = fmt.Sprintf("<br><strong>Compression:</strong> Max %dx%d",
-			s.config.Capture.Compression.MaxWidth, s.config.Capture.Compression.MaxHeight)
-	}
-
-	return fmt.Sprintf(`<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Desktop Surveillance Camera</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 20px;
-            font-family: Arial, sans-serif;
-            background-color: #f0f0f0;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background-color: white;
-            border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-        .status {
-            background-color: #e7f3ff;
-            border: 1px solid #b3d9ff;
-            border-radius: 4px;
-            padding: 10px;
-            margin-bottom: 20px;
-        }
-        .screenshot-container {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-        .screenshot {
-            max-width: 100%%;
-            max-height: 80vh;
-            border: 2px solid #ddd;
-            border-radius: 4px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        }
-        .controls {
-            text-align: center;
-            margin-top: 20px;
-        }
-        .btn {
-            background-color: #007cba;
-            color: white;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            margin: 0 5px;
-            font-size: 16px;
-        }
-        .btn:hover {
-            background-color: #005a87;
-        }
-        .btn:disabled {
-            background-color: #ccc;
-            cursor: not-allowed;
-        }
-        .btn.danger {
-            background-color: #dc3545;
-        }
-        .btn.danger:hover {
-            background-color: #c82333;
-        }
-        .btn.success {
-            background-color: #28a745;
-        }
-        .btn.success:hover {
-            background-color: #218838;
-        }
-        .region-selector {
-            position: relative;
-            display: inline-block;
-            margin: 20px 0;
-        }
-        .selection-overlay {
-            position: absolute;
-            border: 2px dashed #007cba;
-            background-color: rgba(0, 124, 186, 0.1);
-            pointer-events: none;
-            display: none;
-        }
-        .preview-container {
-            text-align: center;
-            margin: 20px 0;
-            display: none;
-        }
-        .preview-image {
-            max-width: 100%;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-        .region-info {
-            background-color: #f8f9fa;
-            border: 1px solid #dee2e6;
-            border-radius: 4px;
-            padding: 10px;
-            margin: 10px 0;
-            display: none;
-        }
-        .last-update {
-            margin-top: 10px;
-            color: #666;
-            font-size: 14px;
-        }
-        .api-info {
-            background-color: #f8f9fa;
-            border: 1px solid #dee2e6;
-            border-radius: 4px;
-            padding: 15px;
-            margin-top: 20px;
-            font-family: monospace;
-            font-size: 12px;
-        }
-        .api-info h4 {
-            margin-top: 0;
-            font-family: Arial, sans-serif;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Desktop Surveillance Camera</h1>
-        </div>
-        
-        <div class="status">
-            <strong>Mode:</strong> %s
-            %s
-            %s
-            %s
-        </div>
-        
-        <div class="screenshot-container">
-            <img id="screenshot" class="screenshot" src="/last" alt="Screenshot" onload="updateLastUpdate()" onerror="handleImageError()">
-        </div>
-        
-        <div class="controls">
-            <button class="btn" onclick="refreshScreenshot()">Refresh Screenshot</button>
-            <button id="regionBtn" class="btn" onclick="toggleRegionMode()">Enable Region Mode</button>
-            <button id="autoRefreshBtn" class="btn" onclick="toggleAutoRefresh()">%s</button>
-            <button class="btn success" onclick="saveConfig()">Save Config</button>
-        </div>
-        
-        <div class="preview-container" id="previewContainer">
-            <h3>Select Region on Preview</h3>
-            <div class="region-selector">
-                <img id="previewImage" class="preview-image" src="/preview" alt="Preview for region selection">
-                <div id="selectionOverlay" class="selection-overlay"></div>
-            </div>
-            <div class="region-info" id="regionInfo">
-                <strong>Selected Region:</strong> <span id="regionText">None</span>
-            </div>
-            <div>
-                <button class="btn success" onclick="applyRegion()">Apply Region</button>
-                <button class="btn danger" onclick="clearRegion()">Clear Region</button>
-                <button class="btn" onclick="cancelRegionMode()">Cancel</button>
-            </div>
-        </div>
-        
-        <div class="last-update" id="lastUpdate"></div>
-        
-        <div class="api-info">
-            <h4>API Usage Examples</h4>
-            <div><strong>Full screenshot:</strong> /last</div>
-            <div><strong>Region screenshot:</strong> /last?x=100&y=100&width=800&height=600</div>
-            <div><strong>Compressed screenshot:</strong> /last?compress=true&max_width=800&max_height=600</div>
-            <div><strong>Combined:</strong> /last?x=0&y=0&width=1920&height=1080&compress=true&max_width=640&max_height=480</div>
-        </div>
-    </div>
-
-    <script>
-        let autoRefreshInterval = null;
-        let isRealtime = %t;
-        let refreshIntervalSeconds = %d;
-        let regionMode = false;
-        let currentRegion = null;
-        let selecting = false;
-        let startX, startY;
-        
-        function updateLastUpdate() {
-            document.getElementById('lastUpdate').textContent = 'Last updated: ' + new Date().toLocaleString();
-        }
-        
-        function handleImageError() {
-            document.getElementById('lastUpdate').textContent = 'Screenshot failed to load';
-        }
-        
-        function refreshScreenshot() {
-            const img = document.getElementById('screenshot');
-            img.src = '/last?' + new Date().getTime();
-        }
-        
-        function toggleAutoRefresh() {
-            const btn = document.getElementById('autoRefreshBtn');
-            if (autoRefreshInterval) {
-                clearInterval(autoRefreshInterval);
-                autoRefreshInterval = null;
-                btn.textContent = 'Enable Auto Refresh';
-                btn.style.backgroundColor = '#007cba';
-            } else {
-                autoRefreshInterval = setInterval(refreshScreenshot, refreshIntervalSeconds * 1000);
-                btn.textContent = 'Disable Auto Refresh';
-                btn.style.backgroundColor = '#d32f2f';
-            }
-        }
-        
-        function toggleRegionMode() {
-            const btn = document.getElementById('regionBtn');
-            const preview = document.getElementById('previewContainer');
-            
-            if (!regionMode) {
-                regionMode = true;
-                btn.textContent = 'Exit Region Mode';
-                btn.classList.add('danger');
-                preview.style.display = 'block';
-                
-                // Refresh preview image
-                const previewImg = document.getElementById('previewImage');
-                previewImg.src = '/preview?' + new Date().getTime();
-                
-                // Add event listeners for region selection
-                previewImg.onload = function() {
-                    setupRegionSelection();
-                };
-            } else {
-                cancelRegionMode();
-            }
-        }
-        
-        function cancelRegionMode() {
-            regionMode = false;
-            const btn = document.getElementById('regionBtn');
-            const preview = document.getElementById('previewContainer');
-            const overlay = document.getElementById('selectionOverlay');
-            const regionInfo = document.getElementById('regionInfo');
-            
-            btn.textContent = 'Enable Region Mode';
-            btn.classList.remove('danger');
-            preview.style.display = 'none';
-            overlay.style.display = 'none';
-            regionInfo.style.display = 'none';
-            
-            // Remove event listeners
-            const previewImg = document.getElementById('previewImage');
-            previewImg.removeEventListener('mousedown', startSelection);
-            previewImg.removeEventListener('mousemove', updateSelection);
-            previewImg.removeEventListener('mouseup', endSelection);
-        }
-        
-        function setupRegionSelection() {
-            const previewImg = document.getElementById('previewImage');
-            
-            previewImg.addEventListener('mousedown', startSelection);
-            previewImg.addEventListener('mousemove', updateSelection);
-            previewImg.addEventListener('mouseup', endSelection);
-            previewImg.addEventListener('mouseleave', endSelection);
-        }
-        
-        function startSelection(e) {
-            if (!regionMode) return;
-            
-            selecting = true;
-            const rect = e.target.getBoundingClientRect();
-            startX = e.clientX - rect.left;
-            startY = e.clientY - rect.top;
-            
-            const overlay = document.getElementById('selectionOverlay');
-            overlay.style.left = startX + 'px';
-            overlay.style.top = startY + 'px';
-            overlay.style.width = '0px';
-            overlay.style.height = '0px';
-            overlay.style.display = 'block';
-            
-            e.preventDefault();
-        }
-        
-        function updateSelection(e) {
-            if (!selecting || !regionMode) return;
-            
-            const rect = e.target.getBoundingClientRect();
-            const currentX = e.clientX - rect.left;
-            const currentY = e.clientY - rect.top;
-            
-            const overlay = document.getElementById('selectionOverlay');
-            const width = Math.abs(currentX - startX);
-            const height = Math.abs(currentY - startY);
-            const left = Math.min(startX, currentX);
-            const top = Math.min(startY, currentY);
-            
-            overlay.style.left = left + 'px';
-            overlay.style.top = top + 'px';
-            overlay.style.width = width + 'px';
-            overlay.style.height = height + 'px';
-        }
-        
-        function endSelection(e) {
-            if (!selecting || !regionMode) return;
-            
-            selecting = false;
-            const rect = e.target.getBoundingClientRect();
-            const currentX = e.clientX - rect.left;
-            const currentY = e.clientY - rect.top;
-            
-            const width = Math.abs(currentX - startX);
-            const height = Math.abs(startY - currentY);
-            
-            if (width > 10 && height > 10) { // Minimum selection size
-                const previewImg = document.getElementById('previewImage');
-                const scaleX = previewImg.naturalWidth / previewImg.clientWidth;
-                const scaleY = previewImg.naturalHeight / previewImg.clientHeight;
-                
-                currentRegion = {
-                    x: Math.round(Math.min(startX, currentX) * scaleX),
-                    y: Math.round(Math.min(startY, currentY) * scaleY),
-                    width: Math.round(width * scaleX),
-                    height: Math.round(Math.abs(currentY - startY) * scaleY)
-                };
-                
-                document.getElementById('regionText').textContent = 
-                    currentRegion.width + 'x' + currentRegion.height + ' at (' + currentRegion.x + ', ' + currentRegion.y + ')';
-                document.getElementById('regionInfo').style.display = 'block';
-            }
-        }
-        
-        function applyRegion() {
-            if (!currentRegion) {
-                alert('Please select a region first');
-                return;
-            }
-            
-            // Update configuration
-            fetch('/config', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    server: {
-                        host: "%s",
-                        port: %d
-                    },
-                    capture: {
-                        mode: "%s",
-                        interval: "%s",
-                        region: currentRegion,
-                        compression: {
-                            enabled: %t,
-                            max_width: %d,
-                            max_height: %d
-                        }
-                    }
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    alert('Region applied successfully!');
-                    cancelRegionMode();
-                    refreshScreenshot();
-                } else {
-                    alert('Failed to apply region');
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('Failed to apply region');
-            });
-        }
-        
-        function clearRegion() {
-            // Clear region from configuration
-            fetch('/config', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    server: {
-                        host: "%s",
-                        port: %d
-                    },
-                    capture: {
-                        mode: "%s",
-                        interval: "%s",
-                        region: null,
-                        compression: {
-                            enabled: %t,
-                            max_width: %d,
-                            max_height: %d
-                        }
-                    }
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    alert('Region cleared successfully!');
-                    cancelRegionMode();
-                    refreshScreenshot();
-                } else {
-                    alert('Failed to clear region');
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('Failed to clear region');
-            });
-        }
-        
-        function saveConfig() {
-            fetch('/config?save=true', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    server: {
-                        host: "%s",
-                        port: %d
-                    },
-                    capture: {
-                        mode: "%s",
-                        interval: "%s",
-                        region: currentRegion,
-                        compression: {
-                            enabled: %t,
-                            max_width: %d,
-                            max_height: %d
-                        }
-                    }
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    alert('Configuration saved successfully!');
-                } else {
-                    alert('Failed to save configuration');
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('Failed to save configuration');
-            });
-        }
-        
-        if (isRealtime) {
-            autoRefreshInterval = setInterval(refreshScreenshot, refreshIntervalSeconds * 1000);
-        }
-        
-        updateLastUpdate();
-    </script>
-    
-    <noscript>
-        <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 4px; padding: 10px; margin: 20px 0;">
-            <strong>Note:</strong> JavaScript is disabled. In on-demand mode, please manually refresh the page to get the latest screenshot.
-        </div>
-    </noscript>
-</body>
-</html>`,
-		mode,
-		func() string {
-			if mode == "realtime" {
-				return fmt.Sprintf("<br><strong>Auto refresh interval:</strong> %d seconds", interval)
-			}
-			return "<br><strong>Description:</strong> On-demand mode, click refresh or reload page for latest screenshot"
-		}(),
-		regionInfo,
-		compressionInfo,
-		func() string {
-			if mode == "realtime" {
-				return "Disable Auto Refresh"
-			}
-			return "Enable Auto Refresh"
-		}(),
-		mode == "realtime",
-		interval,
-		// Configuration values for JavaScript (repeated for different functions)
-		s.config.Server.Host, s.config.Server.Port,
-		s.config.Capture.Mode, s.config.Capture.Interval.String(),
-		s.config.Capture.Compression.Enabled, s.config.Capture.Compression.MaxWidth, s.config.Capture.Compression.MaxHeight,
-		s.config.Server.Host, s.config.Server.Port,
-		s.config.Capture.Mode, s.config.Capture.Interval.String(),
-		s.config.Capture.Compression.Enabled, s.config.Capture.Compression.MaxWidth, s.config.Capture.Compression.MaxHeight,
-		s.config.Server.Host, s.config.Server.Port,
-		s.config.Capture.Mode, s.config.Capture.Interval.String(),
-		s.config.Capture.Compression.Enabled, s.config.Capture.Compression.MaxWidth, s.config.Capture.Compression.MaxHeight,
-	)
 }
