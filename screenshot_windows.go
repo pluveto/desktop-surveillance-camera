@@ -3,6 +3,7 @@
 package main
 
 /*
+#cgo LDFLAGS: -lgdi32 -luser32
 #include <windows.h>
 #include <wingdi.h>
 
