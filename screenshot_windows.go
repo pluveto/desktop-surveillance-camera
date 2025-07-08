@@ -151,7 +151,7 @@ void freeScreenshot(ScreenshotData* screenshot) {
     }
 }
 
-// Set text to clipboard
+// Set text to clipboard with Unicode support
 int setClipboardText(const char* text) {
     if (!OpenClipboard(NULL)) {
         return 0;
@@ -159,18 +159,24 @@ int setClipboardText(const char* text) {
     
     EmptyClipboard();
     
-    int len = strlen(text);
-    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, len + 1);
+    // Convert UTF-8 to UTF-16 for proper Unicode support
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
+    if (wlen == 0) {
+        CloseClipboard();
+        return 0;
+    }
+    
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, wlen * sizeof(WCHAR));
     if (!hMem) {
         CloseClipboard();
         return 0;
     }
     
-    char* pMem = (char*)GlobalLock(hMem);
-    strcpy(pMem, text);
+    WCHAR* pMem = (WCHAR*)GlobalLock(hMem);
+    MultiByteToWideChar(CP_UTF8, 0, text, -1, pMem, wlen);
     GlobalUnlock(hMem);
     
-    SetClipboardData(CF_TEXT, hMem);
+    SetClipboardData(CF_UNICODETEXT, hMem);
     CloseClipboard();
     
     return 1;

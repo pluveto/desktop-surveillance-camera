@@ -556,6 +556,8 @@
                 if (data.status === 'success') {
                     alert('文本发送成功！');
                     textInput.value = ''; // Clear input after successful send
+                    // Refresh screenshot immediately after sending text
+                    setTimeout(refreshScreenshot, 500); // Small delay to allow text to be processed
                 } else {
                     alert('文本发送失败');
                 }
@@ -582,49 +584,87 @@
             const clickX = event.clientX - rect.left;
             const clickY = event.clientY - rect.top;
             
-            // Get actual screen resolution and convert coordinates
-            fetch('/screen-info')
+            // Check if we have a region configured
+            const currentRegion = CONFIG.capture.region;
+            
+            if (currentRegion) {
+                // For region screenshots, convert relative to the region
+                const scaleX = currentRegion.width / img.clientWidth;
+                const scaleY = currentRegion.height / img.clientHeight;
+                
+                // Calculate absolute screen coordinates
+                const screenX = Math.round(currentRegion.x + (clickX * scaleX));
+                const screenY = Math.round(currentRegion.y + (clickY * scaleY));
+                
+                // Send click to server
+                fetch('/click', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ x: screenX, y: screenY })
+                })
                 .then(response => response.json())
-                .then(screenInfo => {
-                    // Convert from display coordinates to screen coordinates
-                    const scaleX = screenInfo.width / img.clientWidth;
-                    const scaleY = screenInfo.height / img.clientHeight;
-                    
-                    const screenX = Math.round(clickX * scaleX);
-                    const screenY = Math.round(clickY * scaleY);
-                    
-                    // Send click to server
-                    fetch('/click', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({ x: screenX, y: screenY })
-                    })
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.status === 'success') {
-                            console.log(`Mouse click sent: (${screenX}, ${screenY})`);
-                        } else {
-                            console.error('Failed to send mouse click');
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Error sending click:', error);
-                    });
+                .then(data => {
+                    if (data.status === 'success') {
+                        console.log(`Mouse click sent (region): (${screenX}, ${screenY})`);
+                        // Refresh screenshot immediately after clicking
+                        setTimeout(refreshScreenshot, 200); // Small delay to allow click to be processed
+                    } else {
+                        console.error('Failed to send mouse click');
+                    }
                 })
                 .catch(error => {
-                    console.error('Failed to get screen info:', error);
-                    // Fallback: assume screenshot is actual size
-                    fetch('/click', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({ x: Math.round(clickX), y: Math.round(clickY) })
-                    })
-                    .catch(err => console.error('Fallback click failed:', err));
+                    console.error('Error sending click:', error);
                 });
+                
+            } else {
+                // For full screen screenshots, get actual screen resolution and convert coordinates
+                fetch('/screen-info')
+                    .then(response => response.json())
+                    .then(screenInfo => {
+                        // Convert from display coordinates to screen coordinates
+                        const scaleX = screenInfo.width / img.clientWidth;
+                        const scaleY = screenInfo.height / img.clientHeight;
+                        
+                        const screenX = Math.round(clickX * scaleX);
+                        const screenY = Math.round(clickY * scaleY);
+                        
+                        // Send click to server
+                        fetch('/click', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({ x: screenX, y: screenY })
+                        })
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.status === 'success') {
+                                console.log(`Mouse click sent (full screen): (${screenX}, ${screenY})`);
+                                // Refresh screenshot immediately after clicking
+                                setTimeout(refreshScreenshot, 200); // Small delay to allow click to be processed
+                            } else {
+                                console.error('Failed to send mouse click');
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Error sending click:', error);
+                        });
+                    })
+                    .catch(error => {
+                        console.error('Failed to get screen info:', error);
+                        // Fallback: assume screenshot is actual size
+                        fetch('/click', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({ x: Math.round(clickX), y: Math.round(clickY) })
+                        })
+                        .catch(err => console.error('Fallback click failed:', err));
+                    });
+            }
         }
         
         // Add Enter key support for text input
