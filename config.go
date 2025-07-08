@@ -18,8 +18,23 @@ type ServerConfig struct {
 }
 
 type CaptureConfig struct {
-    Mode     string        `json:"mode"`     // "realtime" or "ondemand"
-    Interval time.Duration `json:"interval"` // for realtime mode
+    Mode        string        `json:"mode"`        // "realtime" or "ondemand"
+    Interval    time.Duration `json:"interval"`    // for realtime mode
+    Region      *RegionConfig `json:"region"`      // optional screen region
+    Compression CompressionConfig `json:"compression"` // image compression settings
+}
+
+type RegionConfig struct {
+    X      int `json:"x"`
+    Y      int `json:"y"`
+    Width  int `json:"width"`
+    Height int `json:"height"`
+}
+
+type CompressionConfig struct {
+    Enabled   bool `json:"enabled"`
+    MaxWidth  int  `json:"max_width"`
+    MaxHeight int  `json:"max_height"`
 }
 
 func (c *Config) MarshalJSON() ([]byte, error) {
@@ -27,17 +42,23 @@ func (c *Config) MarshalJSON() ([]byte, error) {
     return json.Marshal(&struct {
         *Alias
         Capture struct {
-            Mode     string `json:"mode"`
-            Interval string `json:"interval"`
+            Mode        string             `json:"mode"`
+            Interval    string             `json:"interval"`
+            Region      *RegionConfig      `json:"region"`
+            Compression CompressionConfig  `json:"compression"`
         } `json:"capture"`
     }{
         Alias: (*Alias)(c),
         Capture: struct {
-            Mode     string `json:"mode"`
-            Interval string `json:"interval"`
+            Mode        string             `json:"mode"`
+            Interval    string             `json:"interval"`
+            Region      *RegionConfig      `json:"region"`
+            Compression CompressionConfig  `json:"compression"`
         }{
-            Mode:     c.Capture.Mode,
-            Interval: c.Capture.Interval.String(),
+            Mode:        c.Capture.Mode,
+            Interval:    c.Capture.Interval.String(),
+            Region:      c.Capture.Region,
+            Compression: c.Capture.Compression,
         },
     })
 }
@@ -47,8 +68,10 @@ func (c *Config) UnmarshalJSON(data []byte) error {
     aux := &struct {
         *Alias
         Capture struct {
-            Mode     string `json:"mode"`
-            Interval string `json:"interval"`
+            Mode        string             `json:"mode"`
+            Interval    string             `json:"interval"`
+            Region      *RegionConfig      `json:"region"`
+            Compression CompressionConfig  `json:"compression"`
         } `json:"capture"`
     }{
         Alias: (*Alias)(c),
@@ -59,6 +82,8 @@ func (c *Config) UnmarshalJSON(data []byte) error {
     }
     
     c.Capture.Mode = aux.Capture.Mode
+    c.Capture.Region = aux.Capture.Region
+    c.Capture.Compression = aux.Capture.Compression
     
     if aux.Capture.Interval != "" {
         interval, err := time.ParseDuration(aux.Capture.Interval)
@@ -80,6 +105,12 @@ func DefaultConfig() *Config {
         Capture: CaptureConfig{
             Mode:     "ondemand",
             Interval: 5 * time.Second,
+            Region:   nil, // full screen
+            Compression: CompressionConfig{
+                Enabled:   false,
+                MaxWidth:  1920,
+                MaxHeight: 1080,
+            },
         },
     }
 }

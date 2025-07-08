@@ -1,140 +1,273 @@
 package main
 
 import (
-    "fmt"
-    "net/http"
-    "sync"
-    "time"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"sync"
+	"time"
 )
 
 type Server struct {
-    config        *Config
-    lastScreenshot []byte
-    lastUpdate    time.Time
-    mu            sync.RWMutex
-    stopChan      chan struct{}
+	config         *Config
+	lastScreenshot []byte
+	lastUpdate     time.Time
+	mu             sync.RWMutex
+	stopChan       chan struct{}
 }
 
 func NewServer(config *Config) *Server {
-    return &Server{
-        config:   config,
-        stopChan: make(chan struct{}),
-    }
+	return &Server{
+		config:   config,
+		stopChan: make(chan struct{}),
+	}
 }
 
 func (s *Server) updateScreenshot() error {
-    screenshot, err := TakeScreenshot()
-    if err != nil {
-        return err
-    }
-    
-    pngData, err := screenshot.ToPNGBytes()
-    if err != nil {
-        return err
-    }
-    
-    s.mu.Lock()
-    s.lastScreenshot = pngData
-    s.lastUpdate = time.Now()
-    s.mu.Unlock()
-    
-    return nil
+	return s.updateScreenshotWithOptions(nil)
+}
+
+func (s *Server) updateScreenshotWithOptions(opts *ScreenshotOptions) error {
+	var screenshot *Screenshot
+	var err error
+
+	if opts != nil {
+		screenshot, err = TakeScreenshotWithOptions(opts)
+	} else {
+		// Use config settings for default options
+		opts = &ScreenshotOptions{
+			Region:    nil,
+			Compress:  s.config.Capture.Compression.Enabled,
+			MaxWidth:  s.config.Capture.Compression.MaxWidth,
+			MaxHeight: s.config.Capture.Compression.MaxHeight,
+		}
+
+		// Apply region from config if set
+		if s.config.Capture.Region != nil {
+			opts.Region = &ScreenRegion{
+				X:      s.config.Capture.Region.X,
+				Y:      s.config.Capture.Region.Y,
+				Width:  s.config.Capture.Region.Width,
+				Height: s.config.Capture.Region.Height,
+			}
+		}
+
+		screenshot, err = TakeScreenshotWithOptions(opts)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	pngData, err := screenshot.ToPNGBytesWithOptions(opts)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.lastScreenshot = pngData
+	s.lastUpdate = time.Now()
+	s.mu.Unlock()
+
+	return nil
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-    if r.URL.Path != "/" {
-        http.NotFound(w, r)
-        return
-    }
-    
-    w.Header().Set("Content-Type", "text/html; charset=utf-8")
-    w.Write([]byte(s.getIndexHTML()))
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(s.getIndexHTML()))
 }
 
 func (s *Server) handleLast(w http.ResponseWriter, r *http.Request) {
-    if s.config.Capture.Mode == "ondemand" {
-        err := s.updateScreenshot()
-        if err != nil {
-            http.Error(w, fmt.Sprintf("Failed to capture screenshot: %v", err), http.StatusInternalServerError)
-            return
-        }
-    }
-    
-    s.mu.RLock()
-    screenshot := make([]byte, len(s.lastScreenshot))
-    copy(screenshot, s.lastScreenshot)
-    lastUpdate := s.lastUpdate
-    s.mu.RUnlock()
-    
-    if len(screenshot) == 0 {
-        http.Error(w, "No screenshot available", http.StatusNotFound)
-        return
-    }
-    
-    w.Header().Set("Content-Type", "image/png")
-    w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-    w.Header().Set("Pragma", "no-cache")
-    w.Header().Set("Expires", "0")
-    w.Header().Set("Last-Modified", lastUpdate.UTC().Format(http.TimeFormat))
-    
-    w.Write(screenshot)
+	// Parse query parameters for custom screenshot options
+	opts := s.parseScreenshotOptions(r.URL.Query())
+
+	if s.config.Capture.Mode == "ondemand" {
+		err := s.updateScreenshotWithOptions(opts)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to capture screenshot: %v", err), http.StatusInternalServerError)
+			return
+		}
+	} else if opts != nil {
+		// In realtime mode, if custom options are provided, take a fresh screenshot
+		err := s.updateScreenshotWithOptions(opts)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to capture screenshot with custom options: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	s.mu.RLock()
+	screenshot := make([]byte, len(s.lastScreenshot))
+	copy(screenshot, s.lastScreenshot)
+	lastUpdate := s.lastUpdate
+	s.mu.RUnlock()
+
+	if len(screenshot) == 0 {
+		http.Error(w, "No screenshot available", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	w.Header().Set("Last-Modified", lastUpdate.UTC().Format(http.TimeFormat))
+
+	w.Write(screenshot)
+}
+
+func (s *Server) parseScreenshotOptions(params url.Values) *ScreenshotOptions {
+	opts := &ScreenshotOptions{}
+	hasCustomOptions := false
+
+	// Parse region parameters
+	if x := params.Get("x"); x != "" {
+		if xVal, err := strconv.Atoi(x); err == nil {
+			if opts.Region == nil {
+				opts.Region = &ScreenRegion{}
+			}
+			opts.Region.X = xVal
+			hasCustomOptions = true
+		}
+	}
+
+	if y := params.Get("y"); y != "" {
+		if yVal, err := strconv.Atoi(y); err == nil {
+			if opts.Region == nil {
+				opts.Region = &ScreenRegion{}
+			}
+			opts.Region.Y = yVal
+			hasCustomOptions = true
+		}
+	}
+
+	if width := params.Get("width"); width != "" {
+		if widthVal, err := strconv.Atoi(width); err == nil && widthVal > 0 {
+			if opts.Region == nil {
+				opts.Region = &ScreenRegion{}
+			}
+			opts.Region.Width = widthVal
+			hasCustomOptions = true
+		}
+	}
+
+	if height := params.Get("height"); height != "" {
+		if heightVal, err := strconv.Atoi(height); err == nil && heightVal > 0 {
+			if opts.Region == nil {
+				opts.Region = &ScreenRegion{}
+			}
+			opts.Region.Height = heightVal
+			hasCustomOptions = true
+		}
+	}
+
+	// Parse compression parameters
+	if compress := params.Get("compress"); compress != "" {
+		if compressVal, err := strconv.ParseBool(compress); err == nil {
+			opts.Compress = compressVal
+			hasCustomOptions = true
+		}
+	}
+
+	if maxWidth := params.Get("max_width"); maxWidth != "" {
+		if maxWidthVal, err := strconv.Atoi(maxWidth); err == nil && maxWidthVal > 0 {
+			opts.MaxWidth = maxWidthVal
+			opts.Compress = true
+			hasCustomOptions = true
+		}
+	}
+
+	if maxHeight := params.Get("max_height"); maxHeight != "" {
+		if maxHeightVal, err := strconv.Atoi(maxHeight); err == nil && maxHeightVal > 0 {
+			opts.MaxHeight = maxHeightVal
+			opts.Compress = true
+			hasCustomOptions = true
+		}
+	}
+
+	if !hasCustomOptions {
+		return nil
+	}
+
+	return opts
 }
 
 func (s *Server) startRealtimeCapture() {
-    if s.config.Capture.Mode != "realtime" {
-        return
-    }
-    
-    ticker := time.NewTicker(s.config.Capture.Interval)
-    go func() {
-        defer ticker.Stop()
-        
-        s.updateScreenshot()
-        
-        for {
-            select {
-            case <-ticker.C:
-                err := s.updateScreenshot()
-                if err != nil {
-                    fmt.Printf("Failed to capture screenshot: %v\n", err)
-                }
-            case <-s.stopChan:
-                return
-            }
-        }
-    }()
+	if s.config.Capture.Mode != "realtime" {
+		return
+	}
+
+	ticker := time.NewTicker(s.config.Capture.Interval)
+	go func() {
+		defer ticker.Stop()
+
+		s.updateScreenshot()
+
+		for {
+			select {
+			case <-ticker.C:
+				err := s.updateScreenshot()
+				if err != nil {
+					fmt.Printf("Failed to capture screenshot: %v\n", err)
+				}
+			case <-s.stopChan:
+				return
+			}
+		}
+	}()
 }
 
 func (s *Server) Start() error {
-    http.HandleFunc("/", s.handleIndex)
-    http.HandleFunc("/last", s.handleLast)
-    
-    s.startRealtimeCapture()
-    
-    addr := fmt.Sprintf("%s:%d", s.config.Server.Host, s.config.Server.Port)
-    fmt.Printf("Starting server on %s\n", addr)
-    fmt.Printf("Mode: %s\n", s.config.Capture.Mode)
-    if s.config.Capture.Mode == "realtime" {
-        fmt.Printf("Capture interval: %v\n", s.config.Capture.Interval)
-    }
-    
-    return http.ListenAndServe(addr, nil)
+	http.HandleFunc("/", s.handleIndex)
+	http.HandleFunc("/last", s.handleLast)
+
+	s.startRealtimeCapture()
+
+	addr := fmt.Sprintf("%s:%d", s.config.Server.Host, s.config.Server.Port)
+	fmt.Printf("Starting server on %s\n", addr)
+	fmt.Printf("Mode: %s\n", s.config.Capture.Mode)
+	if s.config.Capture.Mode == "realtime" {
+		fmt.Printf("Capture interval: %v\n", s.config.Capture.Interval)
+	}
+
+	return http.ListenAndServe(addr, nil)
 }
 
 func (s *Server) Stop() {
-    close(s.stopChan)
+	close(s.stopChan)
 }
 
 func (s *Server) getIndexHTML() string {
-    mode := s.config.Capture.Mode
-    interval := int(s.config.Capture.Interval.Seconds())
-    
-    return fmt.Sprintf(`<!DOCTYPE html>
-<html lang="zh-CN">
+	mode := s.config.Capture.Mode
+	interval := int(s.config.Capture.Interval.Seconds())
+
+	// Get region info
+	regionInfo := ""
+	if s.config.Capture.Region != nil {
+		regionInfo = fmt.Sprintf("<br><strong>Region:</strong> %dx%d at (%d,%d)",
+			s.config.Capture.Region.Width, s.config.Capture.Region.Height,
+			s.config.Capture.Region.X, s.config.Capture.Region.Y)
+	}
+
+	// Get compression info
+	compressionInfo := ""
+	if s.config.Capture.Compression.Enabled {
+		compressionInfo = fmt.Sprintf("<br><strong>Compression:</strong> Max %dx%d",
+			s.config.Capture.Compression.MaxWidth, s.config.Capture.Compression.MaxHeight)
+	}
+
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>桌面监控摄像头</title>
+    <title>Desktop Surveillance Camera</title>
     <style>
         body {
             margin: 0;
@@ -198,29 +331,52 @@ func (s *Server) getIndexHTML() string {
             color: #666;
             font-size: 14px;
         }
+        .api-info {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 20px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .api-info h4 {
+            margin-top: 0;
+            font-family: Arial, sans-serif;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>桌面监控摄像头</h1>
+            <h1>Desktop Surveillance Camera</h1>
         </div>
         
         <div class="status">
-            <strong>运行模式:</strong> %s
+            <strong>Mode:</strong> %s
+            %s
+            %s
             %s
         </div>
         
         <div class="screenshot-container">
-            <img id="screenshot" class="screenshot" src="/last" alt="屏幕截图" onload="updateLastUpdate()" onerror="handleImageError()">
+            <img id="screenshot" class="screenshot" src="/last" alt="Screenshot" onload="updateLastUpdate()" onerror="handleImageError()">
         </div>
         
         <div class="controls">
-            <button class="btn" onclick="refreshScreenshot()">刷新截图</button>
+            <button class="btn" onclick="refreshScreenshot()">Refresh Screenshot</button>
             %s
         </div>
         
         <div class="last-update" id="lastUpdate"></div>
+        
+        <div class="api-info">
+            <h4>API Usage Examples</h4>
+            <div><strong>Full screenshot:</strong> /last</div>
+            <div><strong>Region screenshot:</strong> /last?x=100&y=100&width=800&height=600</div>
+            <div><strong>Compressed screenshot:</strong> /last?compress=true&max_width=800&max_height=600</div>
+            <div><strong>Combined:</strong> /last?x=0&y=0&width=1920&height=1080&compress=true&max_width=640&max_height=480</div>
+        </div>
     </div>
 
     <script>
@@ -229,11 +385,11 @@ func (s *Server) getIndexHTML() string {
         let refreshIntervalSeconds = %d;
         
         function updateLastUpdate() {
-            document.getElementById('lastUpdate').textContent = '最后更新: ' + new Date().toLocaleString();
+            document.getElementById('lastUpdate').textContent = 'Last updated: ' + new Date().toLocaleString();
         }
         
         function handleImageError() {
-            document.getElementById('lastUpdate').textContent = '截图加载失败';
+            document.getElementById('lastUpdate').textContent = 'Screenshot failed to load';
         }
         
         function refreshScreenshot() {
@@ -246,11 +402,11 @@ func (s *Server) getIndexHTML() string {
             if (autoRefreshInterval) {
                 clearInterval(autoRefreshInterval);
                 autoRefreshInterval = null;
-                btn.textContent = '开启自动刷新';
+                btn.textContent = 'Enable Auto Refresh';
                 btn.style.backgroundColor = '#007cba';
             } else {
                 autoRefreshInterval = setInterval(refreshScreenshot, refreshIntervalSeconds * 1000);
-                btn.textContent = '关闭自动刷新';
+                btn.textContent = 'Disable Auto Refresh';
                 btn.style.backgroundColor = '#d32f2f';
             }
         }
@@ -264,25 +420,27 @@ func (s *Server) getIndexHTML() string {
     
     <noscript>
         <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 4px; padding: 10px; margin: 20px 0;">
-            <strong>注意:</strong> JavaScript 已禁用。在按需模式下，请手动刷新页面以获取最新截图。
+            <strong>Note:</strong> JavaScript is disabled. In on-demand mode, please manually refresh the page to get the latest screenshot.
         </div>
     </noscript>
 </body>
 </html>`,
-        mode,
-        func() string {
-            if mode == "realtime" {
-                return fmt.Sprintf("<br><strong>自动刷新间隔:</strong> %d秒", interval)
-            }
-            return "<br><strong>说明:</strong> 按需模式，点击刷新或刷新页面获取最新截图"
-        }(),
-        func() string {
-            if mode == "realtime" {
-                return `<button id="autoRefreshBtn" class="btn" onclick="toggleAutoRefresh()">关闭自动刷新</button>`
-            }
-            return `<button id="autoRefreshBtn" class="btn" onclick="toggleAutoRefresh()">开启自动刷新</button>`
-        }(),
-        mode == "realtime",
-        interval,
-    )
+		mode,
+		func() string {
+			if mode == "realtime" {
+				return fmt.Sprintf("<br><strong>Auto refresh interval:</strong> %d seconds", interval)
+			}
+			return "<br><strong>Description:</strong> On-demand mode, click refresh or reload page for latest screenshot"
+		}(),
+		regionInfo,
+		compressionInfo,
+		func() string {
+			if mode == "realtime" {
+				return `<button id="autoRefreshBtn" class="btn" onclick="toggleAutoRefresh()">Disable Auto Refresh</button>`
+			}
+			return `<button id="autoRefreshBtn" class="btn" onclick="toggleAutoRefresh()">Enable Auto Refresh</button>`
+		}(),
+		mode == "realtime",
+		interval,
+	)
 }

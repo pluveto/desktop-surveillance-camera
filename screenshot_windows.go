@@ -56,6 +56,60 @@ ScreenshotData* takeScreenshot() {
     return result;
 }
 
+ScreenshotData* takeRegionScreenshot(int x, int y, int width, int height) {
+    HDC hdcScreen = GetDC(NULL);
+    HDC hdcMemDC = CreateCompatibleDC(hdcScreen);
+    
+    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    
+    // Validate and clamp coordinates
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x + width > screenWidth) width = screenWidth - x;
+    if (y + height > screenHeight) height = screenHeight - y;
+    if (width <= 0 || height <= 0) {
+        ReleaseDC(NULL, hdcScreen);
+        DeleteDC(hdcMemDC);
+        return NULL;
+    }
+    
+    HBITMAP hbmScreen = CreateCompatibleBitmap(hdcScreen, width, height);
+    SelectObject(hdcMemDC, hbmScreen);
+    
+    BitBlt(hdcMemDC, 0, 0, width, height, hdcScreen, x, y, SRCCOPY);
+    
+    BITMAPINFOHEADER bi;
+    bi.biSize = sizeof(BITMAPINFOHEADER);
+    bi.biWidth = width;
+    bi.biHeight = -height; // negative for top-down bitmap
+    bi.biPlanes = 1;
+    bi.biBitCount = 32;
+    bi.biCompression = BI_RGB;
+    bi.biSizeImage = 0;
+    bi.biXPelsPerMeter = 0;
+    bi.biYPelsPerMeter = 0;
+    bi.biClrUsed = 0;
+    bi.biClrImportant = 0;
+    
+    int dataSize = width * height * 4;
+    BYTE* data = (BYTE*)malloc(dataSize);
+    
+    GetDIBits(hdcScreen, hbmScreen, 0, height, data, (BITMAPINFO*)&bi, DIB_RGB_COLORS);
+    
+    ScreenshotData* result = (ScreenshotData*)malloc(sizeof(ScreenshotData));
+    result->data = data;
+    result->width = width;
+    result->height = height;
+    result->size = dataSize;
+    
+    DeleteObject(hbmScreen);
+    DeleteDC(hdcMemDC);
+    ReleaseDC(NULL, hdcScreen);
+    
+    return result;
+}
+
 void freeScreenshot(ScreenshotData* screenshot) {
     if (screenshot) {
         if (screenshot->data) {
@@ -78,14 +132,46 @@ import (
     "unsafe"
 )
 
+type ScreenRegion struct {
+    X      int
+    Y      int
+    Width  int
+    Height int
+}
+
 type Screenshot struct {
     Width  int
     Height int
     Data   []byte
+    Region *ScreenRegion // nil for full screen
+}
+
+type ScreenshotOptions struct {
+    Region     *ScreenRegion
+    Compress   bool
+    MaxWidth   int
+    MaxHeight  int
+    Quality    int // 1-100, only for JPEG (not used for PNG but kept for future)
 }
 
 func TakeScreenshot() (*Screenshot, error) {
-    cScreenshot := C.takeScreenshot()
+    return TakeScreenshotWithOptions(&ScreenshotOptions{})
+}
+
+func TakeScreenshotWithOptions(opts *ScreenshotOptions) (*Screenshot, error) {
+    var cScreenshot *C.ScreenshotData
+    
+    if opts.Region != nil {
+        cScreenshot = C.takeRegionScreenshot(
+            C.int(opts.Region.X),
+            C.int(opts.Region.Y), 
+            C.int(opts.Region.Width),
+            C.int(opts.Region.Height),
+        )
+    } else {
+        cScreenshot = C.takeScreenshot()
+    }
+    
     if cScreenshot == nil {
         return nil, fmt.Errorf("failed to take screenshot")
     }
@@ -101,10 +187,24 @@ func TakeScreenshot() (*Screenshot, error) {
         Width:  width,
         Height: height,
         Data:   make([]byte, len(data)),
+        Region: opts.Region,
     }
     copy(screenshot.Data, data)
     
     return screenshot, nil
+}
+
+func TakeRegionScreenshot(x, y, width, height int) (*Screenshot, error) {
+    region := &ScreenRegion{
+        X:      x,
+        Y:      y,
+        Width:  width,
+        Height: height,
+    }
+    
+    return TakeScreenshotWithOptions(&ScreenshotOptions{
+        Region: region,
+    })
 }
 
 func (s *Screenshot) ToImage() *image.RGBA {
@@ -126,6 +226,57 @@ func (s *Screenshot) ToImage() *image.RGBA {
     return img
 }
 
+func (s *Screenshot) ToCompressedImage(maxWidth, maxHeight int) image.Image {
+    img := s.ToImage()
+    
+    if maxWidth <= 0 && maxHeight <= 0 {
+        return img
+    }
+    
+    bounds := img.Bounds()
+    originalWidth := bounds.Dx()
+    originalHeight := bounds.Dy()
+    
+    if maxWidth <= 0 {
+        maxWidth = originalWidth
+    }
+    if maxHeight <= 0 {
+        maxHeight = originalHeight
+    }
+    
+    // No compression needed if image is already smaller
+    if originalWidth <= maxWidth && originalHeight <= maxHeight {
+        return img
+    }
+    
+    // Calculate aspect ratio preserving dimensions
+    scaleX := float64(maxWidth) / float64(originalWidth)
+    scaleY := float64(maxHeight) / float64(originalHeight)
+    scale := scaleX
+    if scaleY < scaleX {
+        scale = scaleY
+    }
+    
+    newWidth := int(float64(originalWidth) * scale)
+    newHeight := int(float64(originalHeight) * scale)
+    
+    // Create new image with calculated dimensions
+    resized := image.NewRGBA(image.Rect(0, 0, newWidth, newHeight))
+    
+    // Simple nearest neighbor scaling
+    for y := 0; y < newHeight; y++ {
+        for x := 0; x < newWidth; x++ {
+            srcX := int(float64(x) / scale)
+            srcY := int(float64(y) / scale)
+            if srcX < originalWidth && srcY < originalHeight {
+                resized.Set(x, y, img.At(srcX, srcY))
+            }
+        }
+    }
+    
+    return resized
+}
+
 func (s *Screenshot) SaveToPNG(filename string) error {
     img := s.ToImage()
     
@@ -140,6 +291,24 @@ func (s *Screenshot) SaveToPNG(filename string) error {
 
 func (s *Screenshot) ToPNGBytes() ([]byte, error) {
     img := s.ToImage()
+    
+    var buf bytes.Buffer
+    err := png.Encode(&buf, img)
+    if err != nil {
+        return nil, err
+    }
+    
+    return buf.Bytes(), nil
+}
+
+func (s *Screenshot) ToPNGBytesWithOptions(opts *ScreenshotOptions) ([]byte, error) {
+    var img image.Image
+    
+    if opts != nil && opts.Compress && (opts.MaxWidth > 0 || opts.MaxHeight > 0) {
+        img = s.ToCompressedImage(opts.MaxWidth, opts.MaxHeight)
+    } else {
+        img = s.ToImage()
+    }
     
     var buf bytes.Buffer
     err := png.Encode(&buf, img)
