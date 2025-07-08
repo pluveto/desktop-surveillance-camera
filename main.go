@@ -51,7 +51,7 @@ func main() {
 
     validateConfig(config)
 
-    server := NewServer(config)
+    server := NewServer(config, *configFile)
 
     sigChan := make(chan os.Signal, 1)
     signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,16 +12,18 @@ import (
 
 type Server struct {
 	config         *Config
+	configFile     string
 	lastScreenshot []byte
 	lastUpdate     time.Time
 	mu             sync.RWMutex
 	stopChan       chan struct{}
 }
 
-func NewServer(config *Config) *Server {
+func NewServer(config *Config, configFile string) *Server {
 	return &Server{
-		config:   config,
-		stopChan: make(chan struct{}),
+		config:     config,
+		configFile: configFile,
+		stopChan:   make(chan struct{}),
 	}
 }
 
@@ -226,6 +229,8 @@ func (s *Server) startRealtimeCapture() {
 func (s *Server) Start() error {
 	http.HandleFunc("/", s.handleIndex)
 	http.HandleFunc("/last", s.handleLast)
+	http.HandleFunc("/config", s.handleConfig)
+	http.HandleFunc("/preview", s.handlePreview)
 
 	s.startRealtimeCapture()
 
@@ -241,6 +246,89 @@ func (s *Server) Start() error {
 
 func (s *Server) Stop() {
 	close(s.stopChan)
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" {
+		// Return current configuration
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.config)
+		return
+	}
+	
+	if r.Method == "POST" {
+		// Update configuration
+		var newConfig Config
+		err := json.NewDecoder(r.Body).Decode(&newConfig)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+			return
+		}
+		
+		// Validate the new configuration
+		if newConfig.Server.Port < 1 || newConfig.Server.Port > 65535 {
+			http.Error(w, "Invalid port number", http.StatusBadRequest)
+			return
+		}
+		
+		if newConfig.Capture.Mode != "ondemand" && newConfig.Capture.Mode != "realtime" {
+			http.Error(w, "Invalid capture mode", http.StatusBadRequest)
+			return
+		}
+		
+		// Update in-memory configuration
+		s.mu.Lock()
+		oldMode := s.config.Capture.Mode
+		s.config = &newConfig
+		s.mu.Unlock()
+		
+		// Save to file if requested
+		if r.URL.Query().Get("save") == "true" {
+			err = SaveConfig(&newConfig, s.configFile)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
+		
+		// Restart realtime capture if mode changed
+		if oldMode != newConfig.Capture.Mode {
+			// Note: In a more sophisticated implementation, we might restart the capture goroutine
+			// For now, we'll just update the config and let the user restart if needed
+		}
+		
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+		return
+	}
+	
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
+	// Take a screenshot for preview purposes (always full screen, compressed)
+	opts := &ScreenshotOptions{
+		Region:    nil, // Always full screen for preview
+		Compress:  true,
+		MaxWidth:  800,  // Small preview size
+		MaxHeight: 600,
+	}
+	
+	screenshot, err := TakeScreenshotWithOptions(opts)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to capture preview: %v", err), http.StatusInternalServerError)
+		return
+	}
+	
+	pngData, err := screenshot.ToPNGBytesWithOptions(opts)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to encode preview: %v", err), http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Write(pngData)
 }
 
 func (s *Server) getIndexHTML() string {
@@ -326,6 +414,48 @@ func (s *Server) getIndexHTML() string {
             background-color: #ccc;
             cursor: not-allowed;
         }
+        .btn.danger {
+            background-color: #dc3545;
+        }
+        .btn.danger:hover {
+            background-color: #c82333;
+        }
+        .btn.success {
+            background-color: #28a745;
+        }
+        .btn.success:hover {
+            background-color: #218838;
+        }
+        .region-selector {
+            position: relative;
+            display: inline-block;
+            margin: 20px 0;
+        }
+        .selection-overlay {
+            position: absolute;
+            border: 2px dashed #007cba;
+            background-color: rgba(0, 124, 186, 0.1);
+            pointer-events: none;
+            display: none;
+        }
+        .preview-container {
+            text-align: center;
+            margin: 20px 0;
+            display: none;
+        }
+        .preview-image {
+            max-width: 100%;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .region-info {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 10px;
+            margin: 10px 0;
+            display: none;
+        }
         .last-update {
             margin-top: 10px;
             color: #666;
@@ -365,7 +495,25 @@ func (s *Server) getIndexHTML() string {
         
         <div class="controls">
             <button class="btn" onclick="refreshScreenshot()">Refresh Screenshot</button>
-            %s
+            <button id="regionBtn" class="btn" onclick="toggleRegionMode()">Enable Region Mode</button>
+            <button id="autoRefreshBtn" class="btn" onclick="toggleAutoRefresh()">%s</button>
+            <button class="btn success" onclick="saveConfig()">Save Config</button>
+        </div>
+        
+        <div class="preview-container" id="previewContainer">
+            <h3>Select Region on Preview</h3>
+            <div class="region-selector">
+                <img id="previewImage" class="preview-image" src="/preview" alt="Preview for region selection">
+                <div id="selectionOverlay" class="selection-overlay"></div>
+            </div>
+            <div class="region-info" id="regionInfo">
+                <strong>Selected Region:</strong> <span id="regionText">None</span>
+            </div>
+            <div>
+                <button class="btn success" onclick="applyRegion()">Apply Region</button>
+                <button class="btn danger" onclick="clearRegion()">Clear Region</button>
+                <button class="btn" onclick="cancelRegionMode()">Cancel</button>
+            </div>
         </div>
         
         <div class="last-update" id="lastUpdate"></div>
@@ -383,6 +531,10 @@ func (s *Server) getIndexHTML() string {
         let autoRefreshInterval = null;
         let isRealtime = %t;
         let refreshIntervalSeconds = %d;
+        let regionMode = false;
+        let currentRegion = null;
+        let selecting = false;
+        let startX, startY;
         
         function updateLastUpdate() {
             document.getElementById('lastUpdate').textContent = 'Last updated: ' + new Date().toLocaleString();
@@ -411,6 +563,246 @@ func (s *Server) getIndexHTML() string {
             }
         }
         
+        function toggleRegionMode() {
+            const btn = document.getElementById('regionBtn');
+            const preview = document.getElementById('previewContainer');
+            
+            if (!regionMode) {
+                regionMode = true;
+                btn.textContent = 'Exit Region Mode';
+                btn.classList.add('danger');
+                preview.style.display = 'block';
+                
+                // Refresh preview image
+                const previewImg = document.getElementById('previewImage');
+                previewImg.src = '/preview?' + new Date().getTime();
+                
+                // Add event listeners for region selection
+                previewImg.onload = function() {
+                    setupRegionSelection();
+                };
+            } else {
+                cancelRegionMode();
+            }
+        }
+        
+        function cancelRegionMode() {
+            regionMode = false;
+            const btn = document.getElementById('regionBtn');
+            const preview = document.getElementById('previewContainer');
+            const overlay = document.getElementById('selectionOverlay');
+            const regionInfo = document.getElementById('regionInfo');
+            
+            btn.textContent = 'Enable Region Mode';
+            btn.classList.remove('danger');
+            preview.style.display = 'none';
+            overlay.style.display = 'none';
+            regionInfo.style.display = 'none';
+            
+            // Remove event listeners
+            const previewImg = document.getElementById('previewImage');
+            previewImg.removeEventListener('mousedown', startSelection);
+            previewImg.removeEventListener('mousemove', updateSelection);
+            previewImg.removeEventListener('mouseup', endSelection);
+        }
+        
+        function setupRegionSelection() {
+            const previewImg = document.getElementById('previewImage');
+            
+            previewImg.addEventListener('mousedown', startSelection);
+            previewImg.addEventListener('mousemove', updateSelection);
+            previewImg.addEventListener('mouseup', endSelection);
+            previewImg.addEventListener('mouseleave', endSelection);
+        }
+        
+        function startSelection(e) {
+            if (!regionMode) return;
+            
+            selecting = true;
+            const rect = e.target.getBoundingClientRect();
+            startX = e.clientX - rect.left;
+            startY = e.clientY - rect.top;
+            
+            const overlay = document.getElementById('selectionOverlay');
+            overlay.style.left = startX + 'px';
+            overlay.style.top = startY + 'px';
+            overlay.style.width = '0px';
+            overlay.style.height = '0px';
+            overlay.style.display = 'block';
+            
+            e.preventDefault();
+        }
+        
+        function updateSelection(e) {
+            if (!selecting || !regionMode) return;
+            
+            const rect = e.target.getBoundingClientRect();
+            const currentX = e.clientX - rect.left;
+            const currentY = e.clientY - rect.top;
+            
+            const overlay = document.getElementById('selectionOverlay');
+            const width = Math.abs(currentX - startX);
+            const height = Math.abs(currentY - startY);
+            const left = Math.min(startX, currentX);
+            const top = Math.min(startY, currentY);
+            
+            overlay.style.left = left + 'px';
+            overlay.style.top = top + 'px';
+            overlay.style.width = width + 'px';
+            overlay.style.height = height + 'px';
+        }
+        
+        function endSelection(e) {
+            if (!selecting || !regionMode) return;
+            
+            selecting = false;
+            const rect = e.target.getBoundingClientRect();
+            const currentX = e.clientX - rect.left;
+            const currentY = e.clientY - rect.top;
+            
+            const width = Math.abs(currentX - startX);
+            const height = Math.abs(startY - currentY);
+            
+            if (width > 10 && height > 10) { // Minimum selection size
+                const previewImg = document.getElementById('previewImage');
+                const scaleX = previewImg.naturalWidth / previewImg.clientWidth;
+                const scaleY = previewImg.naturalHeight / previewImg.clientHeight;
+                
+                currentRegion = {
+                    x: Math.round(Math.min(startX, currentX) * scaleX),
+                    y: Math.round(Math.min(startY, currentY) * scaleY),
+                    width: Math.round(width * scaleX),
+                    height: Math.round(Math.abs(currentY - startY) * scaleY)
+                };
+                
+                document.getElementById('regionText').textContent = 
+                    currentRegion.width + 'x' + currentRegion.height + ' at (' + currentRegion.x + ', ' + currentRegion.y + ')';
+                document.getElementById('regionInfo').style.display = 'block';
+            }
+        }
+        
+        function applyRegion() {
+            if (!currentRegion) {
+                alert('Please select a region first');
+                return;
+            }
+            
+            // Update configuration
+            fetch('/config', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    server: {
+                        host: "%s",
+                        port: %d
+                    },
+                    capture: {
+                        mode: "%s",
+                        interval: "%s",
+                        region: currentRegion,
+                        compression: {
+                            enabled: %t,
+                            max_width: %d,
+                            max_height: %d
+                        }
+                    }
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert('Region applied successfully!');
+                    cancelRegionMode();
+                    refreshScreenshot();
+                } else {
+                    alert('Failed to apply region');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to apply region');
+            });
+        }
+        
+        function clearRegion() {
+            // Clear region from configuration
+            fetch('/config', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    server: {
+                        host: "%s",
+                        port: %d
+                    },
+                    capture: {
+                        mode: "%s",
+                        interval: "%s",
+                        region: null,
+                        compression: {
+                            enabled: %t,
+                            max_width: %d,
+                            max_height: %d
+                        }
+                    }
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert('Region cleared successfully!');
+                    cancelRegionMode();
+                    refreshScreenshot();
+                } else {
+                    alert('Failed to clear region');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to clear region');
+            });
+        }
+        
+        function saveConfig() {
+            fetch('/config?save=true', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    server: {
+                        host: "%s",
+                        port: %d
+                    },
+                    capture: {
+                        mode: "%s",
+                        interval: "%s",
+                        region: currentRegion,
+                        compression: {
+                            enabled: %t,
+                            max_width: %d,
+                            max_height: %d
+                        }
+                    }
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert('Configuration saved successfully!');
+                } else {
+                    alert('Failed to save configuration');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to save configuration');
+            });
+        }
+        
         if (isRealtime) {
             autoRefreshInterval = setInterval(refreshScreenshot, refreshIntervalSeconds * 1000);
         }
@@ -436,11 +828,21 @@ func (s *Server) getIndexHTML() string {
 		compressionInfo,
 		func() string {
 			if mode == "realtime" {
-				return `<button id="autoRefreshBtn" class="btn" onclick="toggleAutoRefresh()">Disable Auto Refresh</button>`
+				return "Disable Auto Refresh"
 			}
-			return `<button id="autoRefreshBtn" class="btn" onclick="toggleAutoRefresh()">Enable Auto Refresh</button>`
+			return "Enable Auto Refresh"
 		}(),
 		mode == "realtime",
 		interval,
+		// Configuration values for JavaScript (repeated for different functions)
+		s.config.Server.Host, s.config.Server.Port,
+		s.config.Capture.Mode, s.config.Capture.Interval.String(),
+		s.config.Capture.Compression.Enabled, s.config.Capture.Compression.MaxWidth, s.config.Capture.Compression.MaxHeight,
+		s.config.Server.Host, s.config.Server.Port,
+		s.config.Capture.Mode, s.config.Capture.Interval.String(),
+		s.config.Capture.Compression.Enabled, s.config.Capture.Compression.MaxWidth, s.config.Capture.Compression.MaxHeight,
+		s.config.Server.Host, s.config.Server.Port,
+		s.config.Capture.Mode, s.config.Capture.Interval.String(),
+		s.config.Capture.Compression.Enabled, s.config.Capture.Compression.MaxWidth, s.config.Capture.Compression.MaxHeight,
 	)
 }
